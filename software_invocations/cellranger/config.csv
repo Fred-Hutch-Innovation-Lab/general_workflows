@@ -1,0 +1,12 @@
+[gene-expression]
+reference,/fh/fast/_IRC/FHIL/pub/ref/GRCh38/refdata-gex-GRCh38-2024-A
+create-bam,FALSE
+no-secondary,TRUE
+
+[vdj]
+reference,/fh/fast/_IRC/FHIL/pub/ref/GRCh38/refdata-cellranger-vdj-GRCh38-alts-ensembl-7.1.0
+
+[libraries]
+fastq_id,fastqs,lanes,feature_types
+GEX_downsampled,/fh/fast/_IRC/FHIL/grp/analyses/tweets/tweet_SFFS/data/sffs/fastqs,1|2|3|4,gene expression
+VDJ_downsampled,/fh/fast/_IRC/FHIL/grp/analyses/tweets/tweet_SFFS/data/sffs/fastqs,1|2|3|4,vdj
