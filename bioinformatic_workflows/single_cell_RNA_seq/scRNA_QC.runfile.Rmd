@@ -1,0 +1,342 @@
+---
+title: 'scRNA QC template'
+author: "FHIL"
+date: '`r Sys.Date()`'
+output: html_document
+---
+
+```{r, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      fig.width = 8, fig.height = 6,
+                      cache=FALSE, cache.lazy = FALSE) 
+
+library(tidyverse)  ## General R logic
+library(here)       ## Easier specification of file locations
+library(yaml)       ## parses config yaml
+library(immunarch)  ## VDJ processing
+library(Seurat)     ## GEX processing
+library(data.table) ## Melting, among other things
+library(SeuratDisk) ## Save h5 objects out
+```
+
+This script performs quality checks on cellranger processed data. It is
+not intended to perform any data manipulation. This should be lightweight,
+but the format file is separated from the runfile for ease of use and 
+manipulating report aesthetics. The runfile (current file) should be ran
+all the way through, with the last step being to render the format file
+based on objects in the environment produced by the runfile. 
+
+This runfile is in a html_notebook format so you can view all the outputs
+in a single HTML if that's useful, but the final report should be 
+the one rendered by the format file into the reports folder (see final chunk).
+
+You may have to adjust some filter/select functions here, as cellranger seems
+to change their output naming conventions frequently. 
+
+# Read config files
+```{r}
+figures <- list()
+config <- yaml.load_file(here("config/config.yaml"))
+samplesheet <- read.csv(here('config/samplesheet.csv'), header = TRUE)
+metadata <- read.csv(here('config/metadata.csv'), header = TRUE)
+```
+
+The output formats from cellranger multi differ from cellranger count. Choose
+the appropriate code based on your inputs.
+
+# Parse output summaries
+
+```{r}
+## This may be moved to package eventually if it seems robust enough
+# capture_cellranger_multi_qc_metrics <- function(samplesheet, config){
+qc_metrics <- lapply(setNames(samplesheet$Sample, samplesheet$Sample), function(sample) {
+  file <- samplesheet$File[samplesheet$Sample == sample]
+  read.csv(file.path(config$baseDir, config$dataDir,file,"metrics_summary.csv")) 
+}) |> 
+  enframe(name = 'Sample') |>
+  unnest(cols=c(value)) |>
+  as.data.table() |>
+  mutate(value = readr::parse_number(Metric.Value)) 
+```
+
+## GEX
+
+```{r, fig.width=12, fig.height=5}
+      # 'Cells with productive V-J spanning pair',
+      # 'Paired clonotype diversity') |
+plotdata <- qc_metrics |>
+  filter(Library.Type == 'Gene Expression') |>
+  filter(
+    (Metric.Name %in% c(
+      'Sequencing saturation',
+      'Confidently mapped to transcriptome'
+    ) & Category == 'Library') | 
+    (Metric.Name %in% c(
+      'Cells',
+      'Total genes detected',
+      'Confidently mapped reads in cells'
+      ) & Category == 'Cells')
+  ) |>
+  mutate(Metric.Name = ifelse(grepl('%$', Metric.Value), paste(Metric.Name, '(%)'), Metric.Name)) |>
+    mutate(Metric.Name = factor(Metric.Name, levels = c(
+    'Cells',
+    'Sequencing saturation (%)',  
+    'Confidently mapped to transcriptome (%)',
+    'Confidently mapped reads in cells (%)',
+    'Total genes detected'
+  ))) |>
+  select(-c(Grouped.By, Group.Name)) |>
+  merge(metadata, by='Sample') |>
+  group_by(Experiment, Metric.Name) |>
+  summarize(value = mean(value))
+ggplot(plotdata, aes(x=Experiment, y=value)) +
+  geom_col() +
+  facet_wrap(~ Metric.Name, scales='free_y', nrow=1, labeller = label_wrap_gen()) +
+  theme_bw() +
+  labs(x='Experiment', y='Metric value') ->
+  figures[['qc_summary_gex']]
+figures[['qc_summary_gex']]
+```
+
+## VDJ
+
+```{r, fig.width=12, fig.height=5}
+      # 'Cells with productive V-J spanning pair',
+      # 'Paired clonotype diversity') |
+plotdata <- qc_metrics |>
+  filter(Library.Type == 'VDJ T') |>
+  filter(
+    (Metric.Name %in% c(
+      'Estimated number of cells',
+      'Fraction reads in cells',
+      'Mean used reads per cell'
+    ) & Category == 'Library') | 
+    (Metric.Name %in% c(
+      'Cells with productive V-J spanning pair',
+      'Number of cells with productive V-J spanning pair',
+      'Median TRA UMIs per Cell', 
+      'Median TRB UMIs per Cell'
+      # 'Paired clonotype diversity'
+      ) & Category == 'Cells')
+  ) |>
+  mutate(Metric.Name = ifelse(grepl('%$', Metric.Value), paste(Metric.Name, '(%)'), Metric.Name)) |>
+    mutate(Metric.Name = factor(Metric.Name, levels = c(
+      'Estimated number of cells',
+      'Number of cells with productive V-J spanning pair',
+      'Cells with productive V-J spanning pair (%)',
+      'Mean used reads per cell',
+      'Fraction reads in cells (%)',
+      # 'Paired clonotype diversity'
+      'Median TRA UMIs per Cell', 
+      'Median TRB UMIs per Cell'
+  ))) |>
+  select(-c(Grouped.By, Group.Name)) |>
+  merge(metadata, by='Sample') |>
+  group_by(Experiment, Metric.Name) |>
+  summarize(value = mean(value))
+ggplot(plotdata, aes(x=Experiment, y=value)) +
+  geom_col() +
+  facet_wrap(~ Metric.Name, scales='free_y', nrow=1, labeller = label_wrap_gen(width = 20)) +
+  theme_bw() +
+  labs(x='Experiment', y='Metric value') ->
+  figures[['qc_summary_vdj']]
+figures[['qc_summary_vdj']]
+```
+
+
+
+
+# Load GEX data
+
+```{r}
+objs <- lapply(setNames(samplesheet$Sample, samplesheet$Sample), function(sample) {
+  file <- samplesheet$File[samplesheet$Sample == sample]
+  obj <- file.path(config$baseDir, config$dataDir, file, 'count/sample_filtered_feature_bc_matrix.h5') |>
+    Read10X_h5() |>
+    CreateSeuratObject()
+  obj$orig.ident <- sample
+  obj
+})
+```
+
+## Preprocess
+
+```{r}
+objs <- lapply(objs, function(x) {
+  x <- x |> 
+    NormalizeData() |>
+    FindVariableFeatures() |>
+    ScaleData() 
+  x <- x |>
+    RunPCA(features=VariableFeatures(x))
+  x
+})
+lapply(names(objs), function(x){
+  objs[[x]]@project.name <- x
+})
+lapply(objs, ElbowPlot, n=30)
+```
+
+```{r}
+objs <- lapply(objs, function(x) {
+  x |>
+    FindNeighbors(dims=1:15) |>
+    FindClusters()
+})
+```
+
+
+```{r}
+addQCMetrics <- function(obj, mt_pattern = '^MT', rb_pattern = '^RP[SL]') {
+    obj$log10GenesPerUMI <- log10(obj$nFeature_RNA)/log10(obj$nCount_RNA)
+    obj$mtRatio <- PercentageFeatureSet(obj, pattern=mt_pattern) / 100
+    obj$rbRatio <- PercentageFeatureSet(obj, pattern=rb_pattern) / 100
+    obj
+}
+objs <- lapply(objs, addQCMetrics)
+```
+
+## Metric Visualizations
+
+```{r}
+QC_metric_VlnPlot <- function(objs, 
+                              metrics = c('nCount_RNA', 'nFeature_RNA', 'log10GenesPerUMI', 'mtRatio', 'rbRatio'),
+                              metadata) {
+  plotdata <- lapply(objs, function(x){
+      x@meta.data |> 
+        select(all_of(metrics)) 
+    }) |>
+    enframe(name = 'Sample') |>
+    unnest(cols=c(value)) |>
+    as.data.table() |>
+    melt(id.vars='Sample') |>
+    merge(metadata, by='Sample')
+  ggplot(plotdata, aes(y=value, x=Experiment)) +
+    geom_jitter(alpha=0.1, size=.1) +
+    geom_violin(draw_quantiles = 0.5) +
+    facet_wrap(~ variable, scales='free', nrow=1) +
+    theme_bw() +
+    labs(x='Experiment', y = 'Metric value')
+    # facet_grid(Experiment ~ variable, scales='free', space='free_y') +
+    # coord_flip() 
+}
+```
+
+```{r, fig.width=10, fig.height=5}
+figures[['QC_vlns']] <- QC_metric_VlnPlot(objs, c('nCount_RNA', 'nFeature_RNA', 'mtRatio', 'rbRatio'), metadata=metadata)
+figures[['QC_vlns']]
+```
+
+# Load VDJ data
+
+```{r}
+
+vdj_objs <- lapply(setNames(samplesheet$Sample, samplesheet$Sample), function(sample) {
+  file <- samplesheet$File[samplesheet$Sample == sample]
+  obj <- file.path(config$baseDir, config$dataDir, file, 'vdj_t', 'filtered_contig_annotations.csv') |>
+    repLoad()
+  obj$data <- obj$data$filtered_contig_annotations
+  obj
+})
+```
+
+## Metric visualizations
+
+```{r}
+
+plotdata <- data.table::rbindlist(lapply(vdj_objs, function(x) {
+  x$data |>
+    group_by(chain) |>
+    summarize(n=sum(Clones))
+}), idcol = 'Sample') |>
+  merge(metadata, by='Sample') |>
+  group_by(Sample) |>
+  mutate(prop = n / sum(n)) |>
+  group_by(Experiment, chain) |>
+  summarize(n = mean(n), prop = mean(prop)) |>
+  mutate(chain = factor(chain, levels = c(
+    'None',
+    'TRB',
+    'TRA',
+    'TRB;TRB',
+    'TRA;TRA',
+    'TRA;TRA;TRB;TRB',
+    'TRA;TRB;TRB',
+    'TRA;TRA;TRB',
+    'TRA;TRB'
+  ))) |>
+  arrange(Experiment, chain)
+ggplot(plotdata, aes(x=Experiment, y=prop, fill = chain)) +
+  geom_col() +
+  # geom_point(aes(shape = Individual)) +
+  scale_y_continuous(labels=scales::percent) +
+  scale_fill_brewer(type = 'qual', direction = -1) +
+  theme(axis.text.x = element_text(angle=45, hjust=1, vjust=1)) +
+  theme_bw() +
+  labs(x='Experiment', y='% of T cells', fill='Chain(s)') ->
+  figures[['chain recovery stacked']]
+figures[['chain recovery stacked']]
+```
+
+# Saturation curves
+
+```{r}
+sat_curves <- read.csv(here('data/saturation_curves.csv'), header = TRUE)
+plotdata <- merge(sat_curves, metadata, by='Sample', all.x=FALSE)
+ggplot(plotdata, aes(x=reads_per_cell, y=median_genes_per_cell, group=Experiment, color=Experiment)) +
+  geom_smooth() +
+  # geom_line() +
+  scale_x_continuous(labels=scales::label_comma()) +
+  scale_y_continuous(labels=scales::label_comma()) +
+  theme_bw() +
+  labs(x='Average reads per cell', y='Median genes per cell') ->
+  figures[['sat_curves']]
+figures[['sat_curves']]
+```
+
+
+# Save obj
+
+```{r, eval=FALSE}
+saveRDS(objs, here('checkpoints/01_gex_objs.rds'), compress=FALSE)
+saveRDS(vdj_objs, here('checkpoints/01_vdj_objs.rds'), compress=FALSE)
+```
+
+
+```{r, eval=FALSE}
+library(SeuratDisk)
+library(Seurat)
+# SeuratDisk::as.h5Seurat()
+h5_convert <- function(obj, filename, overwrite = TRUE, diet=FALSE) {
+  if (diet) {
+    obj <- obj |>
+      DietSeurat() |>
+      NormalizeData(normalization.method = "LogNormalize", scale.factor = 10000) |>
+      ScaleData()
+  }
+
+  ## Convert to v3 assay
+  obj[["RNA"]] <- GetAssayData(obj[["RNA"]]) |>
+    CreateAssayObject()
+  
+  SaveH5Seurat(obj, filename = paste0(filename, '.h5Seurat'), overwrite = overwrite) #
+  Convert(paste0(filename, '.h5Seurat'), dest = "h5ad")
+  rm(paste0(filename, '.h5Seurat'))
+}
+lapply(names(objs), function(obj) {
+  h5_convert(objs[[obj]], here(paste0('checkpoints/01_', obj)))
+})
+# SaveH5Seurat(tmp, filename = here("checkpoints/01_gex_objs.h5Seurat"), overwrite = TRUE, )
+# Convert(here("checkpoints/01_gex_objs.h5Seurat"), dest = "h5ad")
+```
+
+# Render report
+
+```{r}
+## This only works if all the variables called in the format file 
+## are in the current environment. Check the format file to tweak
+## aesthetics 
+rmarkdown::render(here('reports/format_files/01_QC.format.Rmd'),
+                  output_file = '01_QC-report.html',
+                  output_dir = here('reports'))
+```
