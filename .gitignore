@@ -1,2 +1,3 @@
 *.sif
-compute_environments/rocker-rstudio/users/*
+*.out
+*.err

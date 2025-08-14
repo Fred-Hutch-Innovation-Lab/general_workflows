@@ -1,0 +1,35 @@
+Bootstrap: docker
+From: quay.io/jupyter/datascience-notebook:latest
+
+%labels
+    Author FHIL
+    Version 1.0
+    Description Jupyter Lab with R and Julia
+
+%environment
+    export JUPYTER_ENABLE_LAB=yes
+    export JUPYTER_TOKEN=""
+    export JUPYTER_PASSWORD=""
+
+%post
+    # Update package lists and install essential system libraries
+    apt-get update
+    
+    # Essential system libraries (uncomment as needed)
+    # apt-get install -y \
+    #     libcurl4-openssl-dev 
+    
+    # Python packages will be managed with uv/poetry later
+    # pip install --no-cache-dir \
+    #     package1 \
+    #     package2
+    
+    # R packages will be managed with renv later
+    # R -e "install.packages(c('package1', 'package2'), repos='https://cran.rstudio.com/')"
+    
+    # Clean up
+    apt-get clean
+    rm -rf /var/lib/apt/lists/*
+
+%startscript
+    exec jupyter lab --ip=0.0.0.0 --port=8888 --no-browser --allow-root
