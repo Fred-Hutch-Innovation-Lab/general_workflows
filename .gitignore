@@ -1,3 +1,4 @@
 *.sif
 *.out
 *.err
+**/.ipynb_checkpoints/*
